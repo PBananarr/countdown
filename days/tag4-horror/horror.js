@@ -1109,7 +1109,7 @@ export function build(host, api) {
       scheduleRandomScare();
     }
 
-    const EXIT_URL = CFG.AGE_EXIT_URL ?? 'https://pbananarr.github.io/bday/';
+    const EXIT_URL = CFG.AGE_EXIT_URL ?? 'https://pbananarr.github.io/countdown/';
 
     function leaveGate(e) {
       e?.preventDefault?.();
