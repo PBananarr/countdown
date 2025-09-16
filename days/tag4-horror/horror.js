@@ -535,29 +535,37 @@ export function build(host, api) {
         const intro = trialHall.querySelector('#trial-intro');
         const area = trialHall.querySelector('#trial-area');
         const btn = trialHall.querySelector('#trial-start');
-        const handler = async () => {
-          btn?.removeEventListener('click', handler);
+
+        // Falls der Dialog geschlossen wird, bevor man startet: sauber abbrechen
+        const onClose = () => {
+          btn?.removeEventListener('click', onClick);
+          trialHall.removeEventListener('close', onClose);
+          resolve(false);
+        };
+        trialHall.addEventListener('close', onClose, { once: true });
+
+        const onClick = async () => {
+          btn?.removeEventListener('click', onClick);
+          trialHall.removeEventListener('close', onClose);
+
           intro?.setAttribute('hidden', '');
           area?.removeAttribute('hidden');
 
-          // >>> NEU: AudioContext garantiert aktiv + Master wieder hoch
           try {
             ensureAudio();
             await state.audioCtx?.resume?.();
             const now = state.audioCtx?.currentTime ?? 0;
-            if (state.masterGain) {
-              // vorher wurde in pauseScaresAndSound() stark abgesenkt – hier wieder anheben
-              state.masterGain.gain.cancelScheduledValues?.(now);
-              state.masterGain.gain.setTargetAtTime?.(0.8, now, 0.05);
-            }
+            state.masterGain?.gain?.cancelScheduledValues?.(now);
+            state.masterGain?.gain?.setTargetAtTime?.(0.8, now, 0.05);
           } catch (_) { }
 
-          resolve();
+          resolve(true);
         };
 
-        btn?.addEventListener('click', handler, { once: true });
+        btn?.addEventListener('click', onClick, { once: true });
       });
     }
+
 
     // ======== CHALLENGES (je Item) ========
     // Helpers
@@ -666,7 +674,7 @@ export function build(host, api) {
       });
     }
 
-    // AFFENPFOTE (neu): Bannmeter – Halten & im Ziel loslassen
+    // AFFENPFOTE: Bannmeter – Halten & im Ziel loslassen (mit Armierung gegen frühe Up-Events)
     function challenge_affenpfote() {
       return new Promise((resolve) => {
         ensureAudio();
@@ -695,7 +703,7 @@ export function build(host, api) {
           const note = area.querySelector('.trial-note');
           const btn = area.querySelector('#hold');
           const fillEl = area.querySelector('#fill');
-          let raf = null, startTs = 0, pct = 0, active = false;
+          let raf = null, startTs = 0, pct = 0, active = false, armed = false;
 
           // Audio: steigender Ton während des Haltens
           const o = ctx.createOscillator();
@@ -716,11 +724,7 @@ export function build(host, api) {
             o.frequency.value = 140 + pct * 4 + closeness * 80;
             g.gain.value = 0.02 + closeness * 0.35;
 
-            if (pct >= 100) {
-              // Überfüllt ohne Loslassen -> Fail
-              finish(false, 'Zu spät…');
-              return;
-            }
+            if (pct >= 100) { finish(false, 'Zu spät…'); return; }
             raf = requestAnimationFrame(update);
           }
 
@@ -733,12 +737,18 @@ export function build(host, api) {
             pct = 0;
             fillEl.style.width = '0%';
             try { g.gain.cancelScheduledValues(ctx.currentTime); } catch (_) { }
-            requestAnimationFrame((t) => { startTs = t; raf = requestAnimationFrame(update); });
+            // Armierung: erst nach erstem rAF sind Up-/KeyUp gültig
+            requestAnimationFrame((t) => {
+              startTs = t;
+              armed = true;
+              raf = requestAnimationFrame(update);
+            });
           }
 
           function endHold() {
-            if (!active) return;
+            if (!active || !armed) return; // vor Armierung ignorieren
             active = false;
+            armed = false;
             btn.setAttribute('aria-pressed', 'false');
             if (raf) cancelAnimationFrame(raf);
             const diff = Math.abs(pct - target);
@@ -757,6 +767,7 @@ export function build(host, api) {
 
           function finish(ok, msg) {
             active = false;
+            armed = false;
             if (raf) cancelAnimationFrame(raf);
             note.textContent = msg || (ok ? 'Geschafft!' : 'Gescheitert…');
             cleanup();
@@ -768,12 +779,10 @@ export function build(host, api) {
           function cleanup() {
             try { o.stop(); } catch (_) { }
             try { o.disconnect(); g.disconnect(); } catch (_) { }
-            // Button-Listener entfernen
             btn.removeEventListener('mousedown', onDown);
             btn.removeEventListener('touchstart', onDown, { passive: false });
             btn.removeEventListener('keydown', onKeyDown);
             btn.removeEventListener('keyup', onKeyUp);
-            // Globale Listener entfernen
             window.removeEventListener('mouseup', onUp);
             window.removeEventListener('touchend', onUp, { passive: false });
           }
@@ -781,12 +790,8 @@ export function build(host, api) {
           // Eingaben (Maus, Touch, Tastatur)
           const onDown = (e) => { e.preventDefault(); startHold(); };
           const onUp = (e) => { e.preventDefault(); endHold(); };
-          const onKeyDown = (e) => {
-            if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); startHold(); }
-          };
-          const onKeyUp = (e) => {
-            if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); endHold(); }
-          };
+          const onKeyDown = (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); startHold(); } };
+          const onKeyUp = (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); endHold(); } };
 
           btn.addEventListener('mousedown', onDown);
           btn.addEventListener('touchstart', onDown, { passive: false });
@@ -805,8 +810,6 @@ export function build(host, api) {
         });
       });
     }
-
-
 
 
 
@@ -905,7 +908,7 @@ export function build(host, api) {
       });
     }
 
-    // SPIELUHR: Siegel unter Zeitdruck – jetzt MIT Vorschau-Reihenfolge (Blink + Ton)
+    // SPIELUHR: Siegel unter Zeitdruck – Vorschau-Reihenfolge (Blink + Ton) mit gesperrten Buttons
     function challenge_spieluhr() {
       return new Promise((resolve) => {
         ensureAudio();
@@ -933,6 +936,9 @@ export function build(host, api) {
           const seals = Array.from(area.querySelectorAll('.seal'));
           let pos = 0;
           let showing = true; // solange true, ist noch Vorschau
+
+          // Buttons während der Vorschau HART sperren
+          seals.forEach(b => b.disabled = true);
 
           // kleiner Audiocue pro Siegel (verschiedene Tonhöhen)
           function ping(i) {
@@ -968,16 +974,15 @@ export function build(host, api) {
           // Reihenfolge zeigen
           (async () => {
             note.textContent = 'Reihenfolge wird gezeigt…';
-            for (const i of order) {
-              await flashSeal(i);
-            }
+            for (const i of order) { await flashSeal(i); }
             showing = false;
+            seals.forEach(b => b.disabled = false); // jetzt erst frei
             note.textContent = 'Deine Eingabe…';
           })();
 
           // Eingabe-Handler
           seals.forEach(b => b.addEventListener('click', () => {
-            if (showing) return; // erst nach Vorschau klickbar
+            if (showing || b.disabled) return; // echte Sperre
 
             const i = parseInt(b.dataset.i, 10);
             b.classList.add('on');
@@ -1002,6 +1007,7 @@ export function build(host, api) {
         });
       });
     }
+
 
 
     async function runChallengeFor(itemKey) {
